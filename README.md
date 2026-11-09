@@ -19,3 +19,4 @@ Le tableau de bord et les mesures système sont fonctionnels. L’authentificati
 # cockpit-ca-pu
 # cockpit-ca-pu
 # cockpit-ca-pu
+# cockpit-ca-pu
