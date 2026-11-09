@@ -85,7 +85,8 @@ fi
 step "Activation du service"
 install -o root -g root -m 0644 "$BASE/deploy/admin-ubuntu.service" /etc/systemd/system/admin-ubuntu.service
 systemctl daemon-reload
-if ! systemctl enable --now admin-ubuntu.service; then
+systemctl enable admin-ubuntu.service
+if ! systemctl restart admin-ubuntu.service; then
   systemctl --no-pager --full status admin-ubuntu.service || true
   journalctl -u admin-ubuntu.service -n 30 --no-pager || true
   fail

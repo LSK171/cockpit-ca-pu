@@ -13,7 +13,6 @@ import time
 import asyncio
 from urllib.parse import urlsplit
 
-import pam
 import psutil
 from fastapi import FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
@@ -122,7 +121,7 @@ def helper(action: str, **data):
 
 @app.get("/")
 def index():
-    return FileResponse(ROOT / "static" / "index.html")
+    return FileResponse(ROOT / "static" / "index.html", headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
 
 
 @app.get("/api/session")
@@ -140,9 +139,12 @@ def login(data: Login, request: Request, response: Response):
     if len(LOGIN_FAILS[data.username]) >= 6:
         raise HTTPException(429, "Trop de tentatives. Réessayez dans quelques minutes.")
     try:
-        valid = pam.pam().authenticate(data.username, data.password, service="login")
-    except Exception:
-        valid = False
+        auth_result = helper("auth-check", username=data.username, password=data.password)
+        valid = auth_result.get("authenticated") is True
+    except HTTPException as exc:
+        if exc.status_code != 500:
+            raise
+        raise HTTPException(503, "Le vérificateur PAM privilégié n’est pas installé. Relancez l’installation.")
     if not valid:
         LOGIN_FAILS[data.username].append(now)
         raise HTTPException(401, "Identifiants Linux incorrects.")

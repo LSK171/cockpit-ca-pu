@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/opt/admin-ubuntu/.venv/bin/python
 """Root-owned narrow command broker. Never accepts shell command strings."""
 import json
 import os
@@ -12,6 +12,7 @@ import sys
 import termios
 import fcntl
 import struct
+import pam
 
 USER_RE = re.compile(r"^[a-z_][a-z0-9_-]{1,31}$")
 PACKAGE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.+:_-]{0,127}$")
@@ -40,6 +41,21 @@ def user_lookup(name):
 
 def handle(req):
     action = req.get("action")
+    if action == "auth-check":
+        name, password = req.get("username", ""), req.get("password", "")
+        if not isinstance(name, str) or not isinstance(password, str) or len(password) > 256:
+            return {"authenticated": False}
+        try:
+            user = pwd.getpwnam(name)
+        except KeyError:
+            return {"authenticated": False}
+        # Only human login accounts are accepted. In particular, do not create a
+        # browser session for root or a system service account.
+        if user.pw_uid < 1000 or user.pw_uid == 65534 or user.pw_shell not in {
+            "/bin/bash", "/bin/sh", "/bin/zsh", "/bin/dash"
+        }:
+            return {"authenticated": False}
+        return {"authenticated": bool(pam.authenticate(name, password, service="login", resetcreds=False))}
     if action in {"package-install", "package-remove"}:
         package = req.get("package", "")
         if not PACKAGE_RE.fullmatch(package):
