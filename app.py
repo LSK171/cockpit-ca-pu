@@ -103,7 +103,7 @@ def admin_user(request: Request) -> str:
 def helper(action: str, **data):
     try:
         p = subprocess.run(["/usr/bin/sudo", "-n", "/usr/local/sbin/admin-ubuntu-helper"],
-                           input=json.dumps({"action": action, **data}), text=True,
+                           input=json.dumps({"action": action, **data}) + "\n", text=True,
                            capture_output=True, timeout=900, check=False,
                            env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C.UTF-8"})
     except subprocess.TimeoutExpired:
