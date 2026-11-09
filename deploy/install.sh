@@ -48,8 +48,11 @@ step "Installation de l’application"
 cp -R "$BASE/app.py" "$BASE/requirements.txt" "$BASE/static" "$APP/"
 chown -R root:"$SERVICE_USER" "$APP"
 find "$APP" -type d -exec chmod 0750 {} \;
-find "$APP" -type f -exec chmod 0640 {} \;
-python3 -m venv "$APP/.venv"
+find "$APP" -path "$APP/.venv" -prune -o -type f -exec chmod 0640 {} \;
+if [ ! -x "$APP/.venv/bin/pip" ]; then
+  echo "Réparation de l’environnement Python…"
+  python3 -m venv --clear "$APP/.venv"
+fi
 "$APP/.venv/bin/pip" install --disable-pip-version-check -r "$APP/requirements.txt"
 
 step "Configuration des opérations système"
