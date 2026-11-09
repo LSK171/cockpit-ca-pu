@@ -55,7 +55,7 @@ python3 -m venv "$APP/.venv"
 step "Configuration des opérations système"
 install -o root -g root -m 0755 "$BASE/deploy/admin-ubuntu-helper" /usr/local/sbin/admin-ubuntu-helper
 SUDOERS_TMP=$(mktemp)
-printf '%s\n' 'Defaults:adminubuntu !requiretty' 'adminubuntu ALL=(root) NOPASSWD: /usr/local/sbin/admin-ubuntu-helper' > "$SUDOERS_TMP"
+printf '%s\n' 'adminubuntu ALL=(root) NOPASSWD: /usr/local/sbin/admin-ubuntu-helper' > "$SUDOERS_TMP"
 chmod 0440 "$SUDOERS_TMP"
 visudo -cf "$SUDOERS_TMP"
 install -o root -g root -m 0440 "$SUDOERS_TMP" /etc/sudoers.d/admin-ubuntu
