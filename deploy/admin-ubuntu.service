@@ -1,0 +1,24 @@
+[Unit]
+Description=Admin Ubuntu web administration
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=adminubuntu
+Group=adminubuntu
+WorkingDirectory=/opt/admin-ubuntu
+EnvironmentFile=/etc/admin-ubuntu/app.env
+ExecStart=/opt/admin-ubuntu/.venv/bin/uvicorn app:app --host 0.0.0.0 --port 8443 --ssl-keyfile=/etc/admin-ubuntu/tls.key --ssl-certfile=/etc/admin-ubuntu/tls.crt --proxy-headers --forwarded-allow-ips=127.0.0.1
+Restart=on-failure
+RestartSec=3
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

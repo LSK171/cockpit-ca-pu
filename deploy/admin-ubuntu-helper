@@ -1,0 +1,181 @@
+#!/usr/bin/python3
+"""Root-owned narrow command broker. Never accepts shell command strings."""
+import json
+import os
+import pwd
+import re
+import pty
+import select
+import signal
+import subprocess
+import sys
+import termios
+import fcntl
+import struct
+
+USER_RE = re.compile(r"^[a-z_][a-z0-9_-]{1,31}$")
+PACKAGE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.+:_-]{0,127}$")
+
+
+def run(argv, timeout=900, input_text=None):
+    p = subprocess.run(argv, input=input_text, text=True, capture_output=True,
+                       timeout=timeout, check=False,
+                       env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C.UTF-8"})
+    if p.returncode:
+        raise RuntimeError((p.stderr or p.stdout or "Commande système échouée.").strip()[-1500:])
+    return p.stdout.strip()
+
+
+def user_lookup(name):
+    if not USER_RE.fullmatch(name):
+        raise ValueError("Nom de compte invalide.")
+    try:
+        user = pwd.getpwnam(name)
+    except KeyError:
+        raise ValueError("Compte Linux introuvable.")
+    if user.pw_uid < 1000 or user.pw_uid == 65534:
+        raise ValueError("Les comptes système ne peuvent pas être modifiés ici.")
+    return user
+
+
+def handle(req):
+    action = req.get("action")
+    if action in {"package-install", "package-remove"}:
+        package = req.get("package", "")
+        if not PACKAGE_RE.fullmatch(package):
+            raise ValueError("Nom de paquet invalide.")
+        verb = "install" if action.endswith("install") else "remove"
+        output = run(["/usr/bin/apt-get", verb, "-y", "--", package])
+        return {"output": output[-4000:]}
+    if action == "user-list":
+        out = []
+        for u in pwd.getpwall():
+            if u.pw_uid < 1000 or u.pw_uid == 65534:
+                continue
+            try:
+                groups = subprocess.run(["/usr/bin/id", "-nG", u.pw_name], capture_output=True, text=True, timeout=3, check=True).stdout.split()
+            except subprocess.SubprocessError:
+                groups = []
+            out.append({"username": u.pw_name, "uid": str(u.pw_uid), "home": u.pw_dir,
+                        "shell": u.pw_shell, "admin": bool(set(groups) & {"sudo", "admin"})})
+        return out
+    if action == "user-create":
+        name, password, admin = req.get("username", ""), req.get("password", ""), req.get("admin") is True
+        if not USER_RE.fullmatch(name):
+            raise ValueError("Nom de compte invalide.")
+        if len(password) < 12 or len(password) > 128 or any(c in password for c in "\r\n:\x00"):
+            raise ValueError("Mot de passe invalide (12 caractères minimum).")
+        run(["/usr/sbin/useradd", "-m", "-s", "/bin/bash", name], timeout=10)
+        try:
+            run(["/usr/sbin/chpasswd"], timeout=10, input_text=f"{name}:{password}\n")
+            if admin:
+                run(["/usr/sbin/usermod", "-aG", "sudo", name], timeout=10)
+        except Exception:
+            run(["/usr/sbin/userdel", "-r", "--", name], timeout=30)
+            raise
+        return {"ok": True}
+    if action == "user-delete":
+        name, actor = req.get("username", ""), req.get("actor", "")
+        user = user_lookup(name)
+        user_lookup(actor)
+        if name == actor:
+            raise ValueError("Vous ne pouvez pas supprimer votre propre compte connecté.")
+        if "sudo" in subprocess.run(["/usr/bin/id", "-nG", name], capture_output=True, text=True, check=True).stdout.split():
+            admins = [u for u in pwd.getpwall() if u.pw_uid >= 1000 and u.pw_uid != 65534 and
+                      "sudo" in subprocess.run(["/usr/bin/id", "-nG", u.pw_name], capture_output=True, text=True).stdout.split()]
+            if len(admins) <= 1:
+                raise ValueError("Impossible de supprimer le dernier administrateur sudo.")
+        run(["/usr/sbin/userdel", "-r", "--", user.pw_name], timeout=60)
+        return {"ok": True}
+    if action == "shell":
+        user = user_lookup(req.get("username", ""))
+        if user.pw_shell not in {"/bin/bash", "/bin/sh", "/bin/zsh", "/bin/dash"}:
+            raise ValueError("Le compte n’a pas de shell interactif autorisé.")
+        return shell(user)
+    raise ValueError("Action système non autorisée.")
+
+
+def shell(user):
+    """Bridge stdin/stdout to a PTY after dropping the child to the Linux user."""
+    pid, master = pty.fork()
+    if pid == 0:
+        os.initgroups(user.pw_name, user.pw_gid)
+        os.setgid(user.pw_gid)
+        os.setuid(user.pw_uid)
+        os.chdir(user.pw_dir if os.path.isdir(user.pw_dir) else "/")
+        os.environ.clear()
+        os.environ.update({"HOME": user.pw_dir, "USER": user.pw_name, "LOGNAME": user.pw_name,
+                           "SHELL": user.pw_shell, "TERM": "xterm-256color", "PATH": "/usr/local/bin:/usr/bin:/bin"})
+        os.execv(user.pw_shell, [user.pw_shell, "-l"])
+
+    def stop(*_):
+        try:
+            os.killpg(pid, signal.SIGHUP)
+        except ProcessLookupError:
+            pass
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+    # A conservative fixed terminal size; resize support is added over a future protocol.
+    fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))
+    try:
+        while True:
+            ready, _, _ = select.select([0, master], [], [], 1)
+            if 0 in ready:
+                data = os.read(0, 4096)
+                if not data:
+                    stop()
+                    break
+                os.write(master, data)
+            if master in ready:
+                try:
+                    data = os.read(master, 4096)
+                except OSError:
+                    break
+                if not data:
+                    break
+                os.write(1, data)
+            done, _ = os.waitpid(pid, os.WNOHANG)
+            if done:
+                break
+    finally:
+        try:
+            os.close(master)
+        except OSError:
+            pass
+        try:
+            os.killpg(pid, signal.SIGHUP)
+        except ProcessLookupError:
+            pass
+        try:
+            os.waitpid(pid, 0)
+        except ChildProcessError:
+            pass
+    return {"ok": True}
+
+
+def main():
+    if os.geteuid() != 0:
+        raise SystemExit("Ce helper doit être exécuté par root via sudo.")
+    try:
+        # Read the JSON header byte-wise so no terminal bytes get buffered ahead of it.
+        header = bytearray()
+        while True:
+            char = os.read(0, 1)
+            if not char:
+                raise ValueError("Requête incomplète.")
+            if char == b"\n":
+                break
+            header.extend(char)
+            if len(header) > 8192:
+                raise ValueError("En-tête trop long.")
+        req = json.loads(header.decode("utf-8"))
+        result = handle(req)
+        if req.get("action") != "shell":
+            print(json.dumps(result, ensure_ascii=False))
+    except Exception as exc:
+        print(str(exc), file=sys.stderr)
+        raise SystemExit(1)
+
+
+if __name__ == "__main__":
+    main()
