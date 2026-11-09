@@ -152,9 +152,13 @@ footer b { margin-left: 6px; font: 10px var(--mono); font-weight: 400; }
 .user-form > input { flex: 1; min-width: 170px; }
 .user-form label { display: flex; align-items: center; gap: 6px; color: #b2beb5; font-size: 11px; white-space: nowrap; }
 .user-form button { white-space: nowrap; }
-.terminal-placeholder { min-height: 360px; max-height: 60vh; overflow: auto; margin-top: 18px; padding: 18px; border: 1px solid #29362e; border-radius: 8px; background: #0a0e0b; color: #c1d4c5; white-space: pre-wrap; font: 12px/1.55 var(--mono); }
-.terminal-input { display: block; width: 100%; margin-top: 9px; font-family: var(--mono); }
-.terminal-input:disabled { opacity: .5; }
+.terminal-placeholder { min-height: 360px; height: 52vh; max-height: 70vh; overflow: auto; margin-top: 18px; padding: 18px; border: 1px solid #29362e; border-radius: 8px; outline: none; background: #090d0a; color: #c7d9cb; white-space: pre; font: 13px/1.5 var(--mono); }
+.terminal-placeholder:focus { border-color: #47634e; box-shadow: 0 0 0 3px #79c98a12; }
+.terminal-placeholder.terminal-live::after { content: "▌"; color: #98e3a9; animation: terminal-blink 1s steps(2, start) infinite; }
+.terminal-status { margin-top: 9px; color: #859389; font: 10px var(--mono); }
+.terminal-status::before { content: ""; display: inline-block; width: 6px; height: 6px; margin: 0 7px 1px 0; border-radius: 50%; background: #68756c; }
+.terminal-live + .terminal-status::before { background: #8ce0a5; box-shadow: 0 0 8px #8ce0a566; }
+@keyframes terminal-blink { to { visibility: hidden; } }
 
 .login-screen { position: fixed; z-index: 10; inset: 0; display: grid; place-items: center; padding: 20px; background: #080d0bec; backdrop-filter: blur(8px); }
 .login-card { width: min(410px, 100%); padding: 32px; border: 1px solid #33443a; border-radius: 14px; background: #151d18; box-shadow: 0 28px 100px #0009; }

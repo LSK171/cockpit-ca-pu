@@ -34,7 +34,7 @@ sudo journalctl -u admin-ubuntu -f
 - Mesure de l’occupation des volumes montés.
 - HTTPS direct avec certificat TLS configurable.
 
-Le terminal utilise le broker PTY dédié : le shell tourne sous l’UID du compte Linux connecté, et le compte de service web reste non-root. L’interface accepte les commandes, Ctrl+C et Ctrl+D ; les programmes plein écran et le redimensionnement du terminal ne sont pas encore pris en charge. Ne lancez pas l’application comme root.
+Le terminal utilise le broker PTY dédié : le shell tourne sous l’UID du compte Linux connecté, et le compte de service web reste non-root. Les touches sont envoyées immédiatement, les raccourcis courants du shell sont transmis, et le PTY suit la taille du panneau. Le rendu reste textuel : les applications plein écran comme `vim` ou `htop` ne sont pas encore prises en charge. Ne lancez pas l’application comme root.
 
 Le helper privilégié est `deploy/admin-ubuntu-helper`. Il n’accepte pas de commande shell : seules les opérations nommées dans le code sont exécutées. Le compte de service peut appeler ce helper via sudo sans mot de passe ; gardez les fichiers de l’application et du helper modifiables uniquement par root.
 

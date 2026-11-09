@@ -11,6 +11,7 @@ import socket
 import subprocess
 import time
 import asyncio
+import codecs
 from urllib.parse import urlsplit
 
 import psutil
@@ -39,7 +40,7 @@ async def security_headers(request: Request, call_next):
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "same-origin"
-    response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+    response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self' wss:; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
     return response
 
 
@@ -268,24 +269,48 @@ async def terminal(ws: WebSocket):
         proc.stdin.write((json.dumps({"action": "shell", "username": username}) + "\n").encode())
 
         async def output_to_browser():
+            decoder = codecs.getincrementaldecoder("utf-8")("replace")
             while True:
                 chunk = await asyncio.to_thread(os.read, proc.stdout.fileno(), 4096)
                 if not chunk:
                     break
-                await ws.send_text(chunk.decode("utf-8", errors="replace"))
+                text = decoder.decode(chunk)
+                if text:
+                    await ws.send_text(text)
+            tail = decoder.decode(b"", final=True)
+            if tail:
+                await ws.send_text(tail)
 
         output_task = asyncio.create_task(output_to_browser())
         receive_task = None
         try:
             while not output_task.done():
-                receive_task = asyncio.create_task(ws.receive_text())
+                receive_task = asyncio.create_task(ws.receive())
                 done, _ = await asyncio.wait({output_task, receive_task}, return_when=asyncio.FIRST_COMPLETED)
                 if output_task in done:
                     receive_task.cancel()
                     break
-                msg = receive_task.result()
-                if len(msg) <= 4096:
-                    proc.stdin.write(msg.encode("utf-8", errors="replace"))
+                frame = receive_task.result()
+                if frame.get("type") == "websocket.disconnect":
+                    raise WebSocketDisconnect(code=frame.get("code", 1000))
+                data = frame.get("bytes")
+                text = frame.get("text")
+                if text is not None:
+                    try:
+                        control = json.loads(text)
+                    except json.JSONDecodeError:
+                        control = None
+                    if isinstance(control, dict) and control.get("type") == "resize":
+                        try:
+                            cols = max(40, min(300, int(control.get("cols", 100))))
+                            rows = max(12, min(100, int(control.get("rows", 30))))
+                            data = f"\x00ADMIN_RESIZE:{cols}:{rows}\n".encode()
+                        except (TypeError, ValueError):
+                            data = None
+                    else:
+                        data = text.encode("utf-8", errors="replace")
+                if data and len(data) <= 4096:
+                    proc.stdin.write(data)
                     proc.stdin.flush()
             await output_task
         finally:

@@ -121,7 +121,8 @@ def shell(user):
         os.chdir(user.pw_dir if os.path.isdir(user.pw_dir) else "/")
         os.environ.clear()
         os.environ.update({"HOME": user.pw_dir, "USER": user.pw_name, "LOGNAME": user.pw_name,
-                           "SHELL": user.pw_shell, "TERM": "xterm-256color", "PATH": "/usr/local/bin:/usr/bin:/bin"})
+                           "SHELL": user.pw_shell, "TERM": "xterm-256color", "LANG": "C.UTF-8",
+                           "LC_CTYPE": "C.UTF-8", "PATH": "/usr/local/bin:/usr/bin:/bin"})
         os.execv(user.pw_shell, [user.pw_shell, "-l"])
 
     def stop(*_):
@@ -131,8 +132,43 @@ def shell(user):
             pass
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
-    # A conservative fixed terminal size; resize support is added over a future protocol.
+    # Start with a usable size; the browser updates this after measuring its terminal pane.
     fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))
+    marker = b"\x00ADMIN_RESIZE:"
+    pending = bytearray()
+
+    def forward_input(data):
+        pending.extend(data)
+        while pending:
+            start = pending.find(marker)
+            if start < 0:
+                # Keep only a possible partial control prefix; ordinary keystrokes
+                # are forwarded immediately to preserve interactive input latency.
+                nul = pending.rfind(b"\x00")
+                if nul >= 0 and marker.startswith(pending[nul:]):
+                    if nul:
+                        os.write(master, pending[:nul])
+                        del pending[:nul]
+                    return
+                os.write(master, pending)
+                pending.clear()
+                return
+            if start:
+                os.write(master, pending[:start])
+                del pending[:start]
+                start = 0
+            end = pending.find(b"\n", len(marker))
+            if end < 0:
+                return
+            try:
+                cols, rows = map(int, bytes(pending[len(marker):end]).split(b":"))
+                if 40 <= cols <= 300 and 12 <= rows <= 100:
+                    fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+                    os.killpg(pid, signal.SIGWINCH)
+            except (ValueError, OSError, ProcessLookupError):
+                pass
+            del pending[:end + 1]
+
     try:
         while True:
             ready, _, _ = select.select([0, master], [], [], 1)
@@ -141,7 +177,7 @@ def shell(user):
                 if not data:
                     stop()
                     break
-                os.write(master, data)
+                forward_input(data)
             if master in ready:
                 try:
                     data = os.read(master, 4096)
