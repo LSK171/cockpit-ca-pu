@@ -17,3 +17,4 @@ Ouvrir `http://127.0.0.1:8080`. Le serveur écoute uniquement sur la boucle loca
 
 Le tableau de bord et les mesures système sont fonctionnels. L’authentification Linux, le terminal interactif, la gestion des comptes et les opérations de paquets nécessitent une configuration PAM et des règles sudo dédiées avant exposition réseau ; aucune commande privilégiée n’est activée par défaut.
 # cockpit-ca-pu
+# cockpit-ca-pu
