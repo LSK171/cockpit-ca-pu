@@ -1,20 +1,16 @@
-"""Admin Ubuntu web app. Privileged commands are fixed and passed as argv."""
-from datetime import datetime, timezone
+"""Docker web front end; host operations are delegated to a Unix-socket agent."""
 from pathlib import Path
 from collections import defaultdict, deque
 import hashlib
 import hmac
 import json
 import os
-import platform
 import socket
-import subprocess
 import time
 import asyncio
 import codecs
 from urllib.parse import urlsplit
 
-import psutil
 from fastapi import FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -22,6 +18,7 @@ from pydantic import BaseModel, Field
 
 ROOT = Path(__file__).parent
 SECRET = os.environ.get("ADMIN_UBUNTU_SECRET", "")
+AGENT_SOCKET = os.environ.get("ADMIN_UBUNTU_AGENT_SOCKET", "/run/admin-ubuntu/agent.sock")
 COOKIE = "admin_ubuntu_session"
 SESSION_TTL = 8 * 60 * 60
 LOGIN_FAILS = defaultdict(deque)
@@ -88,9 +85,8 @@ def session_user(request: Request, websocket: bool = False) -> str:
 
 def is_admin(username: str) -> bool:
     try:
-        result = subprocess.run(["/usr/bin/id", "-nG", username], capture_output=True, text=True, timeout=3, check=True)
-        return bool(set(result.stdout.split()) & {"sudo", "admin"})
-    except (subprocess.SubprocessError, OSError):
+        return host_call({"action": "admin-check", "username": username}) is True
+    except HTTPException:
         return False
 
 
@@ -101,23 +97,37 @@ def admin_user(request: Request) -> str:
     return username
 
 
-def helper(action: str, **data):
+def host_call(payload: dict, timeout: int = 30):
+    conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    conn.settimeout(timeout)
     try:
-        p = subprocess.run(["/usr/bin/sudo", "-n", "/usr/local/sbin/admin-ubuntu-helper"],
-                           input=json.dumps({"action": action, **data}) + "\n", text=True,
-                           capture_output=True, timeout=900, check=False,
-                           env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C.UTF-8"})
-    except subprocess.TimeoutExpired:
-        raise HTTPException(503, "Le helper système a dépassé le délai autorisé.")
-    except OSError:
-        raise HTTPException(503, "Le helper système est indisponible.")
-    if p.returncode:
-        detail = (p.stderr or p.stdout or "Commande refusée par sudo.").strip()[-1200:]
-        raise HTTPException(500, detail)
+        conn.connect(AGENT_SOCKET)
+        conn.sendall((json.dumps(payload) + "\n").encode())
+        chunks = bytearray()
+        while len(chunks) <= 4_000_000:
+            part = conn.recv(65536)
+            if not part:
+                break
+            chunks.extend(part)
+            if b"\n" in part:
+                break
+    except (OSError, TimeoutError):
+        raise HTTPException(503, "L’agent Ubuntu sur l’hôte est indisponible. Vérifiez le service admin-ubuntu-agent.")
+    finally:
+        conn.close()
+    if not chunks or b"\n" not in chunks:
+        raise HTTPException(503, "Réponse incomplète de l’agent Ubuntu.")
     try:
-        return json.loads(p.stdout)
+        response = json.loads(bytes(chunks).split(b"\n", 1)[0])
     except json.JSONDecodeError:
-        raise HTTPException(500, "Réponse invalide du helper système.")
+        raise HTTPException(503, "Réponse invalide de l’agent Ubuntu.")
+    if isinstance(response, dict) and "error" in response:
+        raise HTTPException(int(response.get("status", 500)), response["error"])
+    return response
+
+
+def helper(action: str, timeout: int = 900, **data):
+    return host_call({"action": action, **data}, timeout=timeout)
 
 
 @app.get("/")
@@ -165,68 +175,31 @@ def logout(response: Response):
 @app.get("/api/status")
 def status(request: Request):
     session_user(request)
-    mem, swap = psutil.virtual_memory(), psutil.swap_memory()
-    disk, freq = psutil.disk_usage("/"), psutil.cpu_freq()
-    boot = datetime.fromtimestamp(psutil.boot_time(), timezone.utc)
-    counters = psutil.net_io_counters()
-    return {"hostname": socket.gethostname(), "os": f"{platform.system()} {platform.release()}",
-            "platform": platform.platform(), "cpu_count": psutil.cpu_count(logical=False) or psutil.cpu_count(),
-            "threads": psutil.cpu_count(logical=True), "cpu_percent": psutil.cpu_percent(interval=0.15),
-            "cpu_frequency_mhz": round(freq.current) if freq else None,
-            "memory": {"total": mem.total, "used": mem.used, "available": mem.available, "percent": mem.percent},
-            "swap": {"total": swap.total, "used": swap.used, "percent": swap.percent},
-            "disk": {"total": disk.total, "used": disk.used, "free": disk.free, "percent": disk.percent},
-            "uptime_seconds": max(0, int(datetime.now(timezone.utc).timestamp() - boot.timestamp())),
-            "load_average": list(os.getloadavg()) if hasattr(os, "getloadavg") else [], "processes": len(psutil.pids()),
-            "network": {"sent": counters.bytes_sent, "received": counters.bytes_recv},
-            "timestamp": datetime.now(timezone.utc).isoformat()}
+    return host_call({"action": "status"})
 
 
 @app.get("/api/storage")
 def storage(request: Request):
     session_user(request)
-    out = []
-    for part in psutil.disk_partitions(all=False):
-        if not part.mountpoint or part.fstype in {"squashfs", "tmpfs", "devtmpfs"}:
-            continue
-        try:
-            usage = psutil.disk_usage(part.mountpoint)
-            out.append({"device": part.device, "mountpoint": part.mountpoint, "fstype": part.fstype,
-                        "total": usage.total, "used": usage.used, "free": usage.free, "percent": usage.percent})
-        except (PermissionError, OSError):
-            continue
-    return out
+    return host_call({"action": "storage"})
 
 
 @app.get("/api/packages")
 def packages(request: Request, q: str = ""):
     admin_user(request)
-    q = q[:80]
-    try:
-        rows = subprocess.run(["/usr/bin/dpkg-query", "-W", "-f=${binary:Package}\t${Version}\t${db:Status-Status}\\n"],
-                              capture_output=True, text=True, timeout=20, check=True).stdout.splitlines()
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise HTTPException(503, f"dpkg-query indisponible: {exc}")
-    result = []
-    for row in rows:
-        cols = row.split("\t")
-        if len(cols) < 3 or cols[2] != "installed":
-            continue
-        if not q or q.casefold() in cols[0].casefold():
-            result.append({"name": cols[0], "version": cols[1]})
-    return {"packages": result[:500], "truncated": len(result) > 500}
+    return host_call({"action": "packages", "query": q[:80]})
 
 
 @app.post("/api/packages/install")
 def package_install(data: PackageAction, request: Request):
     admin_user(request)
-    return helper("package-install", package=data.package)
+    return helper("package-install", timeout=900, package=data.package)
 
 
 @app.post("/api/packages/remove")
 def package_remove(data: PackageAction, request: Request):
     admin_user(request)
-    return helper("package-remove", package=data.package)
+    return helper("package-remove", timeout=900, package=data.package)
 
 
 @app.get("/api/users")
@@ -262,16 +235,15 @@ async def terminal(ws: WebSocket):
         await ws.close(code=4403)
         return
     await ws.accept()
+    agent_conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
-        proc = subprocess.Popen(["/usr/bin/sudo", "-n", "/usr/local/sbin/admin-ubuntu-helper"],
-                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0,
-                                env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C.UTF-8"})
-        proc.stdin.write((json.dumps({"action": "shell", "username": username}) + "\n").encode())
+        agent_conn.connect(AGENT_SOCKET)
+        agent_conn.sendall((json.dumps({"action": "shell", "username": username}) + "\n").encode())
 
         async def output_to_browser():
             decoder = codecs.getincrementaldecoder("utf-8")("replace")
             while True:
-                chunk = await asyncio.to_thread(os.read, proc.stdout.fileno(), 4096)
+                chunk = await asyncio.to_thread(agent_conn.recv, 4096)
                 if not chunk:
                     break
                 text = decoder.decode(chunk)
@@ -310,22 +282,15 @@ async def terminal(ws: WebSocket):
                     else:
                         data = text.encode("utf-8", errors="replace")
                 if data and len(data) <= 4096:
-                    proc.stdin.write(data)
-                    proc.stdin.flush()
+                    agent_conn.sendall(data)
             await output_task
         finally:
             if receive_task and not receive_task.done():
                 receive_task.cancel()
             try:
-                proc.stdin.close()
+                agent_conn.shutdown(socket.SHUT_RDWR)
             except OSError:
                 pass
-            if proc.poll() is None:
-                proc.terminate()
-            try:
-                await asyncio.to_thread(proc.wait, 2)
-            except subprocess.TimeoutExpired:
-                proc.kill()
     except WebSocketDisconnect:
         pass
     except Exception:
@@ -338,3 +303,4 @@ async def terminal(ws: WebSocket):
             await ws.close()
         except Exception:
             pass
+        agent_conn.close()

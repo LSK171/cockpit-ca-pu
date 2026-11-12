@@ -1,0 +1,28 @@
+services:
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: admin-ubuntu:local
+    container_name: admin-ubuntu-web
+    restart: unless-stopped
+    init: true
+    user: "${ADMIN_UID:?Run deploy/install.sh first}:${ADMIN_GID:?Run deploy/install.sh first}"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 512m
+    environment:
+      ADMIN_UBUNTU_SECRET: ${ADMIN_UBUNTU_SECRET:?Run deploy/install.sh first}
+      ADMIN_UBUNTU_AGENT_SOCKET: /run/admin-ubuntu/agent.sock
+    ports:
+      - "${ADMIN_UBUNTU_BIND:-0.0.0.0}:8443:8443"
+    volumes:
+      - /run/admin-ubuntu:/run/admin-ubuntu
+      - /etc/admin-ubuntu/tls.crt:/run/admin-ubuntu/tls.crt:ro
+      - /etc/admin-ubuntu/tls.key:/run/admin-ubuntu/tls.key:ro

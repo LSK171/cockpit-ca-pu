@@ -1,0 +1,22 @@
+[Unit]
+Description=Admin Ubuntu privileged host agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=adminubuntu
+WorkingDirectory=/opt/admin-ubuntu
+RuntimeDirectory=admin-ubuntu
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=restart
+UMask=0007
+ExecStart=/opt/admin-ubuntu/.venv/bin/python /opt/admin-ubuntu/deploy/host-agent.py
+Restart=on-failure
+RestartSec=2
+PrivateTmp=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

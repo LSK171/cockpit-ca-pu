@@ -1,0 +1,2 @@
+psutil>=6,<8
+python-pam>=2.0,<3
